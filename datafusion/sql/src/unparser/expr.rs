@@ -1303,7 +1303,14 @@ impl Unparser<'_> {
                 Ok(ast::Expr::value(SingleQuotedString(str.to_string())))
             }
             ScalarValue::LargeUtf8(None) => Ok(ast::Expr::value(ast::Value::Null)),
-            ScalarValue::Binary(Some(_)) => not_impl_err!("Unsupported scalar: {v:?}"),
+            ScalarValue::Binary(Some(bin)) => {
+                let hex = bin.iter().flat_map(|x| {
+                    const HEX: [char; 16] = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e','f'];
+                    let (hi, lo) =  (((*x >> 4) & 0xfu8), (*x & 0xfu8));
+                    [HEX[hi as usize], HEX[lo as usize]]
+                }).collect::<String>();
+                Ok(ast::Expr::value(ast::Value::HexStringLiteral(hex)))
+            }
             ScalarValue::Binary(None) => Ok(ast::Expr::value(ast::Value::Null)),
             ScalarValue::BinaryView(Some(_)) => {
                 not_impl_err!("Unsupported scalar: {v:?}")
