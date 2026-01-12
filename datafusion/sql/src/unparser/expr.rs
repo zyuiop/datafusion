@@ -1004,6 +1004,8 @@ impl Unparser<'_> {
             BinaryOperator::Question => Ok(Operator::Question),
             BinaryOperator::QuestionAnd => Ok(Operator::QuestionAnd),
             BinaryOperator::QuestionPipe => Ok(Operator::QuestionPipe),
+            BinaryOperator::Spaceship => Ok(Operator::IsNotDistinctFrom),
+            BinaryOperator::NotEq => Ok(Operator::IsDistinctFrom),
             _ => not_impl_err!("unsupported operation: {op:?}"),
         }
     }
@@ -1023,8 +1025,8 @@ impl Unparser<'_> {
             Operator::Modulo => Ok(BinaryOperator::Modulo),
             Operator::And => Ok(BinaryOperator::And),
             Operator::Or => Ok(BinaryOperator::Or),
-            Operator::IsDistinctFrom => not_impl_err!("unsupported operation: {op:?}"),
-            Operator::IsNotDistinctFrom => not_impl_err!("unsupported operation: {op:?}"),
+            Operator::IsDistinctFrom => Ok(BinaryOperator::NotEq),
+            Operator::IsNotDistinctFrom => Ok(BinaryOperator::Spaceship),
             Operator::RegexMatch => Ok(BinaryOperator::PGRegexMatch),
             Operator::RegexIMatch => Ok(BinaryOperator::PGRegexIMatch),
             Operator::RegexNotMatch => Ok(BinaryOperator::PGRegexNotMatch),
