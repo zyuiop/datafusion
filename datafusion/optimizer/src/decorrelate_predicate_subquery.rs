@@ -17,6 +17,7 @@
 
 //! [`DecorrelatePredicateSubquery`] converts `IN`/`EXISTS` subquery predicates to `SEMI`/`ANTI` joins
 use std::collections::BTreeSet;
+use std::mem;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -35,10 +36,7 @@ use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::expr_rewriter::create_col_from_scalar_expr;
 use datafusion_expr::logical_plan::{JoinType, Subquery};
 use datafusion_expr::utils::{conjunction, expr_to_columns, split_conjunction_owned};
-use datafusion_expr::{
-    BinaryExpr, Expr, Filter, LogicalPlan, LogicalPlanBuilder, Operator, exists,
-    in_subquery, lit, not, not_exists, not_in_subquery,
-};
+use datafusion_expr::{BinaryExpr, Expr, Filter, LogicalPlan, LogicalPlanBuilder, Operator, exists, in_subquery, lit, not, not_exists, not_in_subquery, Projection};
 
 use log::debug;
 
@@ -69,53 +67,13 @@ impl OptimizerRule for DecorrelatePredicateSubquery {
             })?
             .data;
 
-        let LogicalPlan::Filter(filter) = plan else {
-            return Ok(Transformed::no(plan));
-        };
-
-        if !has_subquery(&filter.predicate) {
-            return Ok(Transformed::no(LogicalPlan::Filter(filter)));
+        if let LogicalPlan::Filter(filter) = plan {
+            rewrite_filter(filter, config)
+        } else if let LogicalPlan::Projection(project) = plan {
+            rewrite_project(project, config)
+        } else {
+            Ok(Transformed::no(plan))
         }
-
-        let (with_subqueries, mut other_exprs): (Vec<_>, Vec<_>) =
-            split_conjunction_owned(filter.predicate)
-                .into_iter()
-                .partition(has_subquery);
-
-        assert_or_internal_err!(
-            !with_subqueries.is_empty(),
-            "can not find expected subqueries in DecorrelatePredicateSubquery"
-        );
-
-        // iterate through all exists clauses in predicate, turning each into a join
-        let mut cur_input = Arc::unwrap_or_clone(filter.input);
-        for subquery_expr in with_subqueries {
-            match extract_subquery_info(subquery_expr) {
-                // The subquery expression is at the top level of the filter
-                SubqueryPredicate::Top(subquery) => {
-                    match build_join_top(&subquery, &cur_input, config.alias_generator())?
-                    {
-                        Some(plan) => cur_input = plan,
-                        // If the subquery can not be converted to a Join, reconstruct the subquery expression and add it to the Filter
-                        None => other_exprs.push(subquery.expr()),
-                    }
-                }
-                // The subquery expression is embedded within another expression
-                SubqueryPredicate::Embedded(expr) => {
-                    let (plan, expr_without_subqueries) =
-                        rewrite_inner_subqueries(cur_input, expr, config)?;
-                    cur_input = plan;
-                    other_exprs.push(expr_without_subqueries);
-                }
-            }
-        }
-
-        let expr = conjunction(other_exprs);
-        if let Some(expr) = expr {
-            let new_filter = Filter::try_new(expr, Arc::new(cur_input))?;
-            cur_input = LogicalPlan::Filter(new_filter);
-        }
-        Ok(Transformed::yes(cur_input))
     }
 
     fn name(&self) -> &str {
@@ -125,6 +83,95 @@ impl OptimizerRule for DecorrelatePredicateSubquery {
     fn apply_order(&self) -> Option<ApplyOrder> {
         Some(ApplyOrder::TopDown)
     }
+}
+
+fn rewrite_filter(
+    filter: Filter,
+    config: &dyn OptimizerConfig,
+) -> Result<Transformed<LogicalPlan>> {
+    if !has_subquery(&filter.predicate) {
+        return Ok(Transformed::no(LogicalPlan::Filter(filter)));
+    }
+
+    let (with_subqueries, mut other_exprs): (Vec<_>, Vec<_>) =
+        split_conjunction_owned(filter.predicate)
+            .into_iter()
+            .partition(has_subquery);
+
+    assert_or_internal_err!(
+            !with_subqueries.is_empty(),
+            "can not find expected subqueries in DecorrelatePredicateSubquery"
+        );
+
+    // iterate through all exists clauses in predicate, turning each into a join
+    let mut cur_input = Arc::unwrap_or_clone(filter.input);
+    for subquery_expr in with_subqueries {
+        match extract_subquery_info(subquery_expr) {
+            // The subquery expression is at the top level of the filter
+            SubqueryPredicate::Top(subquery) => {
+                match build_join_top(&subquery, &cur_input, config.alias_generator())?
+                {
+                    Some(plan) => cur_input = plan,
+                    // If the subquery can not be converted to a Join, reconstruct the subquery expression and add it to the Filter
+                    None => other_exprs.push(subquery.expr()),
+                }
+            }
+            // The subquery expression is embedded within another expression
+            SubqueryPredicate::Embedded(expr) => {
+                let (plan, expr_without_subqueries) =
+                    rewrite_inner_subqueries(cur_input, expr, config)?;
+                cur_input = plan;
+                other_exprs.push(expr_without_subqueries);
+            }
+        }
+    }
+
+    let expr = conjunction(other_exprs);
+    if let Some(expr) = expr {
+        let new_filter = Filter::try_new(expr, Arc::new(cur_input))?;
+        cur_input = LogicalPlan::Filter(new_filter);
+    }
+    Ok(Transformed::yes(cur_input))
+}
+
+fn rewrite_project(
+    mut project: Projection,
+    config: &dyn OptimizerConfig,
+) -> Result<Transformed<LogicalPlan>> {
+    if !project.expr.iter().any(has_subquery) {
+        return Ok(Transformed::no(LogicalPlan::Projection(project)));
+    }
+
+    let mut cur_input = Arc::unwrap_or_clone(project.input);
+    let mut new_projections = Vec::with_capacity(project.expr.len());
+    for expression in project.expr {
+        if !has_subquery(&expression) {
+            new_projections.push(expression);
+            continue;
+        }
+
+        match extract_subquery_info(expression) {
+            // The subquery expression is at the top level of the filter
+            SubqueryPredicate::Top(subquery) => {
+                match build_join_top(&subquery, &cur_input, config.alias_generator())?
+                {
+                    Some(plan) => cur_input = plan,
+                    // If the subquery can not be converted to a Join, reconstruct the subquery expression and add it to the Filter
+                    None => new_projections.push(subquery.expr()),
+                }
+            }
+            // The subquery expression is embedded within another expression
+            SubqueryPredicate::Embedded(expr) => {
+                let (plan, expr_without_subqueries) =
+                    rewrite_inner_subqueries(cur_input, expr, config)?;
+                cur_input = plan;
+                new_projections.push(expr_without_subqueries);
+            }
+        }
+    }
+
+    let new_project = Projection::try_new(new_projections, Arc::new(cur_input))?;
+    Ok(Transformed::yes(LogicalPlan::Projection(new_project)))
 }
 
 fn rewrite_inner_subqueries(
