@@ -402,6 +402,9 @@ fn math_decimal_coercion(
             let coerced_type = get_wider_decimal_type_cross_variant(lhs_type, rhs_type)?;
             Some((coerced_type.clone(), coerced_type))
         }
+        (dec, str) | (str, dec) if dec.is_decimal() && str.is_string() => {
+            Some((dec.clone(), dec.clone()))
+        }
         // Unlike with comparison we don't coerce to a decimal in the case of floating point
         // numbers, instead falling back to floating point arithmetic instead
         (
@@ -1382,6 +1385,24 @@ fn mathematics_numerical_coercion(
     rhs_type: &DataType,
 ) -> Option<DataType> {
     use arrow::datatypes::DataType::*;
+
+    // String coercion
+    if let Some(coerced) = match (lhs_type, rhs_type) {
+        (s, Float64) | (Float64, s) if s.is_string() => Some(Float64),
+        (s, Float32) | (Float32, s) if s.is_string() => Some(Float32),
+        (s, Float16) | (Float16, s) if s.is_string() => Some(Float16),
+        (s, Int64) | (Int64, s) if s.is_string() => Some(Int64),
+        (s, Int32) | (Int32, s) if s.is_string() => Some(Int32),
+        (s, Int16) | (Int16, s) if s.is_string() => Some(Int16),
+        (s, Int8) | (Int8, s) if s.is_string() => Some(Int8),
+        (s, UInt64) | (UInt64, s) if s.is_string() => Some(UInt64),
+        (s, UInt32) | (UInt32, s) if s.is_string() => Some(UInt32),
+        (s, UInt16) | (UInt16, s) if s.is_string() => Some(UInt16),
+        (s, UInt8) | (UInt8, s) if s.is_string() => Some(UInt8),
+        _ => None
+    } {
+        return Some(coerced);
+    }
 
     // Error on any non-numeric type
     if !both_numeric_or_null_and_numeric(lhs_type, rhs_type) {
