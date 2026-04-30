@@ -333,6 +333,7 @@ impl FunctionalDependencies {
         other: &FunctionalDependencies,
         join_type: &JoinType,
         left_cols_len: usize,
+        (fixed_left, fixed_right): (HashSet<usize>, HashSet<usize>),
     ) -> FunctionalDependencies {
         // Get mutable copies of left and right side dependencies:
         let mut right_func_dependencies = other.clone();
@@ -342,6 +343,27 @@ impl FunctionalDependencies {
             JoinType::Inner | JoinType::Left | JoinType::Right => {
                 // Add offset to right schema:
                 right_func_dependencies.add_offset(left_cols_len);
+
+                // values determine all values from the other side of the join that are entirely fixed
+                let left_fully_matched_dependencies = left_func_dependencies.deps.iter()
+                    .filter(|dep| dep.source_indices.iter().all(|index| fixed_left.contains(index)))
+                    .flat_map(|dep| dep.target_indices.clone())
+                    .collect::<Vec<_>>();
+                let right_fully_matched_dependencies = right_func_dependencies.deps.iter()
+                    .filter(|dep| dep.source_indices.iter().all(|index| fixed_right.contains(&(*index - left_cols_len))))
+                    .flat_map(|dep| dep.target_indices.clone())
+                    .collect::<Vec<_>>();
+
+                // Any dependency that fully appears in the ON clause of the JOIN causes the other side of the join to entirely depend on it
+                // Put in other words: if a primary key appears entirely in the ON clause of the JOIN, then all columns from the other side of the JOIN depend on that primary key.
+                // This is true if both primary keys appear entirely (and is by design).
+                left_func_dependencies.deps.iter_mut()
+                    .filter(|dep| dep.source_indices.iter().all(|index| fixed_left.contains(index)))
+                    .for_each(|dep| dep.target_indices.extend_from_slice(right_fully_matched_dependencies.as_slice()));
+
+                right_func_dependencies.deps.iter_mut()
+                    .filter(|dep| dep.source_indices.iter().all(|index| fixed_right.contains(&(*index - left_cols_len))))
+                    .for_each(|dep| dep.target_indices.extend_from_slice(left_fully_matched_dependencies.as_slice()));
 
                 // Result may have multiple values, update the dependency mode:
                 left_func_dependencies =

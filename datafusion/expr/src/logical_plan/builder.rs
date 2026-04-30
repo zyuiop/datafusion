@@ -38,11 +38,7 @@ use crate::logical_plan::{
     Window,
 };
 use crate::select_expr::SelectExpr;
-use crate::utils::{
-    can_hash, columnize_expr, compare_sort_expr, expand_qualified_wildcard,
-    expand_wildcard, expr_to_columns, find_valid_equijoin_key_pair,
-    group_window_expr_by_sort_keys,
-};
+use crate::utils::{can_hash, columnize_expr, compare_sort_expr, expand_qualified_wildcard, expand_wildcard, expr_as_column_expr, expr_to_columns, find_valid_equijoin_key_pair, group_window_expr_by_sort_keys};
 use crate::{
     DmlStatement, ExplainOption, Expr, ExprSchemable, Operator, RecursiveQuery,
     Statement, TableProviderFilterPushDown, TableSource, WriteOp, and, binary_expr, lit,
@@ -1130,8 +1126,13 @@ impl LogicalPlanBuilder {
             .zip(right_keys)
             .map(|(l, r)| (Expr::Column(l), Expr::Column(r)))
             .collect();
+
+
+        // TODO: Idea: use Filter::is_scalar as inspiration to determine if the on + filters return 0 or 1 row per source row
+
+        println!("join_detailed_with_options [{on:?}] [{filter:?}]");
         let join_schema =
-            build_join_schema(self.plan.schema(), right.schema(), &join_type)?;
+            build_join_schema(self.plan.schema(), right.schema(), &join_type, Some(Join::get_eq_columns(self.plan.as_ref(), &right, &on, &filter)))?;
 
         // Inner type without join condition is cross join
         if join_type != JoinType::Inner && on.is_empty() && filter.is_none() {
@@ -1648,6 +1649,7 @@ pub fn build_join_schema(
     left: &DFSchema,
     right: &DFSchema,
     join_type: &JoinType,
+    eq_columns: Option<(datafusion_common::HashSet<usize>, datafusion_common::HashSet<usize>)>,
 ) -> Result<DFSchema> {
     fn nullify_fields<'a>(
         fields: impl Iterator<Item = (Option<&'a TableReference>, &'a Arc<Field>)>,
@@ -1727,6 +1729,7 @@ pub fn build_join_schema(
         right.functional_dependencies(),
         join_type,
         left.fields().len(),
+        eq_columns.unwrap_or_default()
     );
 
     let (schema1, schema2) = match join_type {
@@ -2864,13 +2867,13 @@ mod tests {
         )?;
 
         let join_schema =
-            build_join_schema(&left_schema, &right_schema, &JoinType::Left)?;
+            build_join_schema(&left_schema, &right_schema, &JoinType::Left, None)?;
         assert_eq!(
             join_schema.metadata(),
             &HashMap::from([("key".to_string(), "left".to_string())])
         );
         let join_schema =
-            build_join_schema(&left_schema, &right_schema, &JoinType::Right)?;
+            build_join_schema(&left_schema, &right_schema, &JoinType::Right, None)?;
         assert_eq!(
             join_schema.metadata(),
             &HashMap::from([("key".to_string(), "right".to_string())])

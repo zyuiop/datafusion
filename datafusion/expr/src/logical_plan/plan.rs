@@ -23,19 +23,19 @@ use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock};
 
-use super::DdlStatement;
 use super::dml::CopyTo;
 use super::invariants::{
-    InvariantLevel, assert_always_invariants_at_current_node,
-    assert_executable_invariants,
+    assert_always_invariants_at_current_node, assert_executable_invariants,
+    InvariantLevel,
 };
+use super::DdlStatement;
 use crate::builder::{unique_field_aliases, unnest_with_options};
 use crate::expr::{
-    Alias, Placeholder, Sort as SortExpr, WindowFunction, WindowFunctionParams,
-    intersect_metadata_for_union,
+    intersect_metadata_for_union, Alias, Placeholder, Sort as SortExpr, WindowFunction,
+    WindowFunctionParams,
 };
 use crate::expr_rewriter::{
-    NamePreserver, create_col_from_scalar_expr, normalize_cols, normalize_sorts,
+    create_col_from_scalar_expr, normalize_cols, normalize_sorts, NamePreserver,
 };
 use crate::logical_plan::display::{GraphvizVisitor, IndentVisitor};
 use crate::logical_plan::extension::UserDefinedLogicalNode;
@@ -45,9 +45,9 @@ use crate::utils::{
     grouping_set_expr_count, grouping_set_to_exprlist, split_conjunction,
 };
 use crate::{
-    BinaryExpr, CreateMemoryTable, CreateView, Execute, Expr, ExprSchemable,
-    LogicalPlanBuilder, Operator, Prepare, TableProviderFilterPushDown, TableSource,
-    WindowFunctionDefinition, build_join_schema, expr_vec_fmt, requalify_sides_if_needed,
+    build_join_schema, expr_vec_fmt, requalify_sides_if_needed, BinaryExpr, CreateMemoryTable, CreateView,
+    Execute, Expr, ExprSchemable, LogicalPlanBuilder, Operator,
+    Prepare, TableProviderFilterPushDown, TableSource, WindowFunctionDefinition,
 };
 
 use arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
@@ -58,10 +58,10 @@ use datafusion_common::tree_node::{
     Transformed, TreeNode, TreeNodeContainer, TreeNodeRecursion,
 };
 use datafusion_common::{
-    Column, Constraints, DFSchema, DFSchemaRef, DataFusionError, Dependency,
+    aggregate_functional_dependencies, assert_eq_or_internal_err, assert_or_internal_err, internal_err, plan_err, Column,
+    Constraints, DFSchema, DFSchemaRef, DataFusionError, Dependency,
     FunctionalDependence, FunctionalDependencies, NullEquality, ParamValues, Result,
-    ScalarValue, Spans, TableReference, UnnestOptions, aggregate_functional_dependencies,
-    assert_eq_or_internal_err, assert_or_internal_err, internal_err, plan_err,
+    ScalarValue, Spans, TableReference, UnnestOptions,
 };
 use indexmap::IndexSet;
 
@@ -663,9 +663,6 @@ impl LogicalPlan {
                 null_equality,
                 null_aware,
             }) => {
-                let schema =
-                    build_join_schema(left.schema(), right.schema(), &join_type)?;
-
                 let new_on: Vec<_> = on
                     .into_iter()
                     .map(|equi_expr| {
@@ -673,6 +670,13 @@ impl LogicalPlan {
                         (equi_expr.0.unalias(), equi_expr.1.unalias())
                     })
                     .collect();
+
+                let schema = build_join_schema(
+                    left.schema(),
+                    right.schema(),
+                    &join_type,
+                    Some(Join::get_eq_columns(left.as_ref(), right.as_ref(), &new_on, &filter))
+                )?;
 
                 Ok(LogicalPlan::Join(Join {
                     left,
@@ -907,7 +911,6 @@ impl LogicalPlan {
                 ..
             }) => {
                 let (left, right) = self.only_two_inputs(inputs)?;
-                let schema = build_join_schema(left.schema(), right.schema(), join_type)?;
 
                 let equi_expr_count = on.len() * 2;
                 assert!(expr.len() >= equi_expr_count);
@@ -935,6 +938,13 @@ impl LogicalPlan {
                     // SimplifyExpression rule may add alias to the equi_expr.
                     new_on.push((left.unalias(), right.unalias()));
                 }
+
+                let schema = build_join_schema(
+                    left.schema(),
+                    right.schema(),
+                    join_type,
+                    Some(Join::get_eq_columns(&left, &right, &new_on, &filter_expr))
+                )?;
 
                 Ok(LogicalPlan::Join(Join {
                     left: Arc::new(left),
@@ -3875,6 +3885,80 @@ pub struct Join {
 }
 
 impl Join {
+    /// Returns true if a join between these two schemas would produce at most one row per source row
+    pub fn get_eq_columns(
+        left_plan: &LogicalPlan,
+        right_plan: &LogicalPlan,
+        on: &Vec<(Expr, Expr)>,
+        filter: &Option<Expr>,
+    ) -> (
+        datafusion_common::HashSet<usize>,
+        datafusion_common::HashSet<usize>,
+    ) {
+        let exprs = on
+            .iter()
+            .map(|(left, right)| {
+                Expr::BinaryExpr(BinaryExpr {
+                    left: Box::new(left.clone()),
+                    right: Box::new(right.clone()),
+                    op: Operator::Eq,
+                })
+            })
+            .chain(
+                filter
+                    .iter()
+                    .flat_map(|expr| split_conjunction(expr))
+                    .cloned(),
+            )
+            .collect::<Vec<_>>();
+
+        let mut left_set = datafusion_common::HashSet::new();
+        let mut right_set = datafusion_common::HashSet::new();
+
+        for expr in exprs.iter() {
+            println!("get_eq_columns. Expr: {expr}");
+            let Expr::BinaryExpr(BinaryExpr {
+                left,
+                op: Operator::Eq,
+                right,
+            }) = expr
+            else {
+                continue;
+            };
+            // This is a no-op filter expression
+            if left == right {
+                continue;
+            }
+
+            match (left.as_ref(), right.as_ref()) {
+                (Expr::Column(c1), Expr::Column(c2)) => {
+                    if let Some(left_index) = left_plan.schema().maybe_index_of_column(c1) {
+                        if let Some(right_index) = right_plan.schema().maybe_index_of_column(c2) {
+                            left_set.insert(left_index);
+                            right_set.insert(right_index);
+                        }
+                    } else {
+                        if let Some(left_index) = left_plan.schema().maybe_index_of_column(c2) {
+                            let right_index = right_plan.schema().index_of_column(c1).unwrap();
+                            left_set.insert(left_index);
+                            right_set.insert(right_index);
+                        }
+                    }
+                },
+                (Expr::Column(c), _) | (_, Expr::Column(c)) => {
+                    if let Some(left_index) = left_plan.schema().maybe_index_of_column(c) {
+                        left_set.insert(left_index);
+                    } else {
+                        right_set.insert(right_plan.schema().index_of_column(c).unwrap());
+                    }
+                },
+                _ => continue,
+            }
+        };
+
+        (left_set, right_set)
+    }
+
     /// Creates a new Join operator with automatically computed schema.
     ///
     /// This constructor computes the schema based on the join type and inputs,
@@ -3905,7 +3989,8 @@ impl Join {
         null_equality: NullEquality,
         null_aware: bool,
     ) -> Result<Self> {
-        let join_schema = build_join_schema(left.schema(), right.schema(), &join_type)?;
+        let join_schema =
+            build_join_schema(left.schema(), right.schema(), &join_type, Some(Self::get_eq_columns(left.as_ref(), right.as_ref(), &on, &filter)))?;
 
         Ok(Join {
             left,
@@ -3960,6 +4045,7 @@ impl Join {
             left_sch.schema(),
             right_sch.schema(),
             &original_join.join_type,
+            Some(Self::get_eq_columns(left.as_ref(), right.as_ref(), &on, &original_join.filter))
         )?;
 
         Ok((
@@ -4402,14 +4488,14 @@ mod tests {
     use crate::select_expr::SelectExpr;
     use crate::test::function_stub::{count, count_udaf};
     use crate::{
-        GroupingSet, binary_expr, col, exists, in_subquery, lit, placeholder,
-        scalar_subquery,
+        binary_expr, col, exists, in_subquery, lit, placeholder, scalar_subquery,
+        GroupingSet,
     };
     use datafusion_common::metadata::ScalarAndMetadata;
     use datafusion_common::tree_node::{
         TransformedResult, TreeNodeRewriter, TreeNodeVisitor,
     };
-    use datafusion_common::{Constraint, ScalarValue, not_impl_err};
+    use datafusion_common::{not_impl_err, Constraint, ScalarValue};
     use insta::{assert_debug_snapshot, assert_snapshot};
     use std::hash::DefaultHasher;
 
