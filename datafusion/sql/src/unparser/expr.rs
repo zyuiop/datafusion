@@ -1291,7 +1291,7 @@ impl Unparser<'_> {
 
     /// DataFusion ScalarValues sometimes require a ast::Expr to construct.
     /// For example ScalarValue::Date32(d) corresponds to the ast::Expr CAST('datestr' as DATE)
-    fn scalar_to_sql(&self, v: &ScalarValue) -> Result<ast::Expr> {
+    pub fn scalar_to_sql(&self, v: &ScalarValue) -> Result<ast::Expr> {
         match v {
             ScalarValue::Null => Ok(ast::Expr::value(ast::Value::Null)),
             ScalarValue::Boolean(Some(b)) => {
@@ -1821,7 +1821,7 @@ impl Unparser<'_> {
         }))
     }
 
-    fn arrow_dtype_to_ast_dtype(&self, field: &FieldRef) -> Result<ast::DataType> {
+    pub fn arrow_dtype_to_ast_dtype(&self, field: &FieldRef) -> Result<ast::DataType> {
         let data_type = field.data_type();
         match data_type {
             DataType::Null => {
