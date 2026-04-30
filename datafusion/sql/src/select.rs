@@ -18,7 +18,7 @@
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 use std::sync::Arc;
-
+use arrow::datatypes::FieldRef;
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 use crate::query::to_order_by_exprs_with_select;
 use crate::utils::{
@@ -29,7 +29,7 @@ use crate::utils::{
 
 use datafusion_common::error::DataFusionErrorBuilder;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion_common::{Column, DFSchema, Result, not_impl_err, plan_err};
+use datafusion_common::{Column, DFSchema, Result, not_impl_err, plan_err, Constraint, HashMap};
 use datafusion_common::{RecursionUnnestOption, UnnestOptions};
 use datafusion_expr::expr::{Alias, PlannedReplaceSelectItem, WildcardOptions};
 use datafusion_expr::expr_rewriter::{
