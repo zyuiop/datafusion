@@ -144,7 +144,10 @@ impl ScalarUDFImpl for CoalesceFunc {
             return exec_err!("coalesce must have at least one argument");
         }
 
-        try_type_union_resolution(arg_types)
+        let last_arg_type = arg_types.last().unwrap();
+        Ok(
+            arg_types.iter().map(|_| last_arg_type.clone()).collect()
+        )
     }
 
     fn documentation(&self) -> Option<&Documentation> {
